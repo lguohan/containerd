@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+
+#   Copyright The containerd Authors.
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
+set -euo pipefail
+
+repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+export GOMAXPROCS="${GOMAXPROCS:-2}"
+
+if [[ "${1:-}" != --inside ]]; then
+  run_tests=false
+  build_tests=true
+  for argument in "$@"; do
+    case "$argument" in
+      --run) run_tests=true ;;
+      --no-build) build_tests=false ;;
+      --help|-h)
+        printf '%s\n' 'Usage: script/test-shared-netns --run [--no-build]' \
+          'Builds as the invoking user, then uses sudo for a disposable Linux daemon.' \
+          'Requires Go, make, runc, sudo (unless root), and util-linux unshare.' \
+          'Optional environment: GO, GOMAXPROCS, TEST_IMAGE_LIST.'
+        exit 0
+        ;;
+      *) printf 'Unknown argument: %s\n' "$argument" >&2; exit 2 ;;
+    esac
+  done
+  if [[ "$run_tests" != true ]]; then
+    printf '%s\n' 'Pass --run to authorize the isolated root integration tests.' >&2
+    exit 2
+  fi
+  if [[ "$(uname -s)" != Linux ]]; then
+    printf '%s\n' 'The shared-netns integration tests require Linux.' >&2
+    exit 2
+  fi
+  runc_binary=$(command -v runc)
+  unshare_binary=$(command -v unshare)
+  image_list="${TEST_IMAGE_LIST:-}"
+  if [[ -n "$image_list" ]]; then
+    image_list=$(realpath "$image_list")
+  fi
+  if [[ "$build_tests" == true ]]; then
+    make -C "$repository_root" GO="${GO:-go}" BUILDTAGS=no_btrfs \
+      GO_BUILD_FLAGS="-p $GOMAXPROCS" \
+      bin/containerd bin/ctr bin/containerd-shim-runc-v2
+    (cd "$repository_root" && "${GO:-go}" test -p "$GOMAXPROCS" -c \
+      -o bin/shared-netns-integration.test ./integration)
+  fi
+  for binary in containerd ctr containerd-shim-runc-v2 shared-netns-integration.test; do
+    if [[ ! -x "$repository_root/bin/$binary" ]]; then
+      printf 'Missing executable: %s/bin/%s\n' "$repository_root" "$binary" >&2
+      exit 1
+    fi
+  done
+  test_root=$(mktemp -d /tmp/containerd-shared-netns.XXXXXX)
+  printf 'Isolated test directory (retained for inspection): %s\n' "$test_root"
+  root_command=()
+  if (( EUID != 0 )); then
+    root_command=(sudo)
+  fi
+  exec "${root_command[@]}" "$unshare_binary" \
+    --mount --pid --fork --mount-proc --kill-child --propagation private \
+    "$repository_root/script/test-shared-netns" --inside "$test_root" "$runc_binary" "$image_list"
+fi
+
+if (( EUID != 0 || $$ != 1 )) || [[ $# != 4 ]]; then
+  printf '%s\n' 'The internal harness must run as root at PID 1 in its private namespace.' >&2
+  exit 2
+fi
+test_root=$2
+runc_binary=$3
+image_list=$4
+export PATH="$repository_root/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+mkdir -p "$test_root/cni" "$test_root/cni-bin" "$test_root/opt"
+cat >"$test_root/config.toml" <<EOF
+version = 4
+root = '$test_root/root'
+state = '$test_root/state'
+imports = []
+disabled_plugins = ['io.containerd.nri.v1.nri']
+required_plugins = ['io.containerd.grpc.v1.cri']
+[plugins.'io.containerd.internal.v1.opt']
+path = '$test_root/opt'
+[plugins.'io.containerd.cri.v1.images']
+snapshotter = 'native'
+use_local_image_pull = true
+[plugins.'io.containerd.cri.v1.runtime']
+netns_mounts_under_state_dir = true
+[plugins.'io.containerd.cri.v1.runtime'.cni]
+conf_dir = '$test_root/cni'
+bin_dirs = ['$test_root/cni-bin']
+[plugins.'io.containerd.cri.v1.runtime'.containerd]
+default_runtime_name = 'runc'
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
+runtime_type = 'io.containerd.runc.v2'
+sandboxer = 'podsandbox'
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]
+Root = '$test_root/runc'
+BinaryName = '$runc_binary'
+SystemdCgroup = false
+EOF
+
+supervise() {
+  while true; do
+    containerd --config "$test_root/config.toml" --address "$test_root/containerd.sock" >>"$test_root/daemon.log" 2>&1 &
+    daemon_pid=$!
+    printf '%s\n' "$daemon_pid" >"$test_root/daemon.pid.next"
+    mv "$test_root/daemon.pid.next" "$test_root/daemon.pid"
+    wait "$daemon_pid" || true
+    sleep 0.5
+  done
+}
+
+supervise &
+supervisor_pid=$!
+cleanup() {
+  kill "$supervisor_pid" 2>/dev/null || true
+  if [[ -f "$test_root/daemon.pid" ]]; then
+    kill "$(cat "$test_root/daemon.pid")" 2>/dev/null || true
+  fi
+  printf 'Test logs: %s/tests.log and %s/daemon.log\n' "$test_root" "$test_root"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+ready=false
+for (( attempt = 0; attempt < 100; attempt++ )); do
+  if [[ -S "$test_root/containerd.sock" ]] && \
+    ctr --address "$test_root/containerd.sock" --timeout 2s plugins ls 2>/dev/null | grep -q 'io.containerd.grpc.v1.*cri.*ok'; then
+    ready=true
+    break
+  fi
+  sleep 0.2
+done
+if [[ "$ready" != true ]]; then
+  cat "$test_root/daemon.log" >&2
+  exit 1
+fi
+ctr --address "$test_root/containerd.sock" --timeout 2s plugins ls
+"$repository_root/bin/shared-netns-integration.test" \
+  -test.run '^TestSharedNetNS' -test.v -test.timeout 8m \
+  -cri-endpoint "unix://$test_root/containerd.sock" \
+  -shared-netns-test -shared-netns-restart-pid-file "$test_root/daemon.pid" \
+  -image-list "$image_list" 2>&1 | tee "$test_root/tests.log"

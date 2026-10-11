@@ -30,6 +30,7 @@ import (
 	"github.com/containerd/go-cni"
 	"github.com/containerd/log"
 	"github.com/containerd/typeurl/v2"
+	"github.com/pelletier/go-toml/v2"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/containerd/containerd/v2/core/leases"
@@ -65,6 +66,14 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	metadata := config.GetMetadata()
 	if metadata == nil {
 		return nil, errors.New("sandbox config must include metadata")
+	}
+	sharedGroup, err := sharedNetNSGroup(config, r.GetRuntimeHandler())
+	if err != nil {
+		return nil, err
+	}
+	executionHandler, ociRuntime, err := c.config.ResolveSandboxRuntime(config, r.GetRuntimeHandler())
+	if err != nil {
+		return nil, fmt.Errorf("unable to get OCI runtime for sandbox %q: %w", id, err)
 	}
 	name := makeSandboxName(metadata)
 
@@ -110,14 +119,8 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	}()
 
 	var (
-		err         error
 		sandboxInfo = sb.Sandbox{ID: id}
 	)
-
-	ociRuntime, err := c.config.GetSandboxRuntime(config, r.GetRuntimeHandler())
-	if err != nil {
-		return nil, fmt.Errorf("unable to get OCI runtime for sandbox %q: %w", id, err)
-	}
 
 	sandboxInfo.Runtime.Name = ociRuntime.Type
 	sandboxInfo.Sandboxer = ociRuntime.Sandboxer
@@ -153,6 +156,21 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 		},
 	)
 	sandbox.Sandboxer = ociRuntime.Sandboxer
+	if sharedGroup != "" {
+		ociRuntime.Snapshotter = c.RuntimeSnapshotter(ctx, ociRuntime)
+		snapshot, err := toml.Marshal(ociRuntime)
+		if err != nil {
+			return nil, fmt.Errorf("checkpoint shared-netns execution runtime: %w", err)
+		}
+		sandbox.ExecutionRuntimeHandler = executionHandler
+		sandbox.ExecutionRuntimeConfig = string(snapshot)
+		if handler := c.runtimeHandlers[criconfig.RuntimeSharedNetNS]; handler != nil && handler.Features != nil {
+			sandbox.ExecutionRuntimeFeatures = &runtime.RuntimeHandlerFeatures{
+				RecursiveReadOnlyMounts: handler.Features.RecursiveReadOnlyMounts,
+				UserNamespaces:          handler.Features.UserNamespaces,
+			}
+		}
+	}
 
 	if err := sandboxInfo.AddExtension(podsandbox.MetadataKey, &sandbox.Metadata); err != nil {
 		return nil, fmt.Errorf("unable to update extensions for sandbox %q: %w", id, err)
@@ -205,7 +223,17 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 			netnsMountDir = filepath.Join(c.config.StateDir, "netns")
 		}
 
-		if !userNsEnabled {
+		if sharedGroup != "" {
+			if c.sharedNetNS == nil {
+				return nil, errors.New("shared-netns manager is unavailable")
+			}
+			membership, acquireErr := c.sharedNetNS.Acquire(sharedGroup, id)
+			if acquireErr != nil {
+				return nil, fmt.Errorf("acquire shared network namespace: %w", acquireErr)
+			}
+			sandbox.SharedNetNS = &membership
+			sandbox.NetNS = netns.LoadNetNS(membership.Path)
+		} else if !userNsEnabled {
 			sandbox.NetNS, err = netns.NewNetNS(netnsMountDir)
 		} else {
 			usernsOpts := config.GetLinux().GetSecurityContext().GetNamespaceOptions().GetUsernsOptions()
@@ -219,7 +247,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 		defer func() {
 			// Remove the network namespace only if all the resource cleanup is done
 			if retErr != nil && cleanupErr == nil {
-				if cleanupErr = sandbox.NetNS.Remove(); cleanupErr != nil {
+				if cleanupErr = c.releaseSandboxNetwork(sandbox); cleanupErr != nil {
 					log.G(ctx).WithError(cleanupErr).Errorf("Failed to remove network namespace %s for sandbox %q", sandbox.NetNSPath, id)
 					return
 				}
@@ -304,6 +332,9 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 			r.GetRuntimeHandler(), ociRuntime.Type, ociRuntime.Sandboxer)
 	}
 
+	if err := c.validateSandboxNetwork(sandbox); err != nil {
+		return nil, fmt.Errorf("validate sandbox network namespace: %w", err)
+	}
 	ctrl, err := c.sandboxService.StartSandbox(ctx, sandbox.Sandboxer, id)
 	if err != nil {
 		if cerr, ok := errors.AsType[podsandbox.CleanupErr](err); ok {
@@ -454,6 +485,9 @@ func (c *criService) getNetworkPlugin(runtimeClass string) cni.CNI {
 
 // setupPodNetwork setups up the network for a pod
 func (c *criService) setupPodNetwork(ctx context.Context, sandbox *sandboxstore.Sandbox) (retErr error) {
+	if sandbox.SharedNetNS != nil {
+		return nil
+	}
 	ctx, span := tracing.StartSpan(ctx, tracing.Name("cni", "setup_pod_network"),
 		tracing.WithNamespace(ctx),
 	)

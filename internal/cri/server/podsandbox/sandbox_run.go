@@ -93,7 +93,7 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 		return cin, fmt.Errorf("failed to get image spec: %w", err)
 	}
 
-	ociRuntime, err := c.config.GetSandboxRuntime(config, metadata.RuntimeHandler)
+	ociRuntime, err := metadata.GetRuntime(&c.config)
 	if err != nil {
 		return cin, fmt.Errorf("failed to get sandbox runtime: %w", err)
 	}

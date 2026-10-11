@@ -97,6 +97,9 @@ func (c *criService) StartContainer(ctx context.Context, r *runtime.StartContain
 	if sandbox.Status.Get().State != sandboxstore.StateReady {
 		return nil, fmt.Errorf("sandbox container %q is not running", sandboxID)
 	}
+	if err := c.validateSandboxNetwork(sandbox); err != nil {
+		return nil, fmt.Errorf("validate sandbox network namespace: %w", err)
+	}
 	span.SetAttributes(tracing.Attribute("sandbox.id", sandboxID))
 
 	ioCreation := func(id string) (_ containerdio.IO, err error) {
@@ -120,7 +123,7 @@ func (c *criService) StartContainer(ctx context.Context, r *runtime.StartContain
 		}
 	}
 
-	ociRuntime, err := c.config.GetSandboxRuntime(sandbox.Config, sandbox.Metadata.RuntimeHandler)
+	ociRuntime, err := sandbox.Metadata.GetRuntime(&c.config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sandbox runtime: %w", err)
 	}

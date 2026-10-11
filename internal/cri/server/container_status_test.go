@@ -398,6 +398,10 @@ func (s *fakeImageService) PullImage(context.Context, string, func(string) (stri
 func (s *fakeImageService) UpdateRuntime(runtimeName string, imagePlatform *images.ImagePlatform) {
 }
 
+func (s *fakeImageService) UpdateRuntimeAlias(alias, runtimeName string) error {
+	return nil
+}
+
 func patchExceptedWithState(expected *runtime.ContainerStatus, state runtime.ContainerState) {
 	expected.State = state
 	switch state {

@@ -117,7 +117,7 @@ func toCRISandboxInfo(ctx context.Context, sb *types.PodSandbox) (map[string]str
 		si.Status = "deleted"
 	}
 	netns := getNetNS(&sb.Metadata)
-	if netns != nil {
+	if netns != nil && sb.Metadata.SharedNetNS == nil {
 		// Add network closed information if sandbox is not using host network.
 		closed, err := netns.Closed()
 		if err != nil {

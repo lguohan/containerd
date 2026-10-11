@@ -26,6 +26,8 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 const (
@@ -125,4 +127,45 @@ func TestRuntimeSnapshotter(t *testing.T) {
 			assert.Equal(t, test.expectSnapshotter, cri.RuntimeSnapshotter(context.Background(), test.runtime))
 		})
 	}
+}
+
+func TestSharedRuntimeImagePlatformAlias(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		platform        *ImagePlatform
+		wantSnapshotter string
+	}{
+		{name: "global snapshotter", wantSnapshotter: "overlayfs"},
+		{
+			name:            "runtime snapshotter",
+			platform:        &ImagePlatform{Snapshotter: "native", Platform: platforms.DefaultSpec()},
+			wantSnapshotter: "native",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, _ := newTestCRIService()
+			service.config.Snapshotter = "overlayfs"
+			service.UpdateRuntime("custom-runc", test.platform)
+			require.NoError(t, service.UpdateRuntimeAlias(criconfig.RuntimeSharedNetNS, "custom-runc"))
+			assert.Equal(t, test.platform, service.runtimePlatforms[criconfig.RuntimeSharedNetNS])
+			for _, sandboxConfig := range []*runtime.PodSandboxConfig{nil, {}} {
+				snapshotter, err := service.snapshotterFromPodSandboxConfig(context.Background(), "test-image", sandboxConfig, criconfig.RuntimeSharedNetNS)
+				require.NoError(t, err)
+				assert.Equal(t, test.wantSnapshotter, snapshotter)
+			}
+		})
+	}
+}
+
+func TestRuntimeAliasPreservesImagePlatformOverride(t *testing.T) {
+	service, _ := newTestCRIService()
+	imagePlatform := &ImagePlatform{Snapshotter: "image-override", Platform: platforms.DefaultSpec()}
+	service.runtimePlatforms["custom-runc"] = imagePlatform
+	service.UpdateRuntime("custom-runc", &ImagePlatform{Snapshotter: "runtime-snapshotter", Platform: platforms.DefaultSpec()})
+	require.NoError(t, service.UpdateRuntimeAlias(criconfig.RuntimeSharedNetNS, "custom-runc"))
+	assert.Same(t, imagePlatform, service.runtimePlatforms[criconfig.RuntimeSharedNetNS])
+
+	require.ErrorContains(t, service.UpdateRuntimeAlias(criconfig.RuntimeSharedNetNS, "custom-runc"), "already configured")
+	require.ErrorContains(t, service.UpdateRuntimeAlias("missing-target", "missing"), "unknown runtime")
+	assert.NotContains(t, service.runtimePlatforms, "missing-target")
 }

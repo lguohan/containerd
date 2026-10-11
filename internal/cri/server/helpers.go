@@ -382,7 +382,7 @@ func (c *criService) getPodSandboxRuntime(sandboxID string) (runtime criconfig.R
 	if err != nil {
 		return criconfig.Runtime{}, err
 	}
-	runtime, err = c.config.GetSandboxRuntime(sandbox.Config, sandbox.Metadata.RuntimeHandler)
+	runtime, err = sandbox.Metadata.GetRuntime(&c.config)
 	if err != nil {
 		return criconfig.Runtime{}, err
 	}

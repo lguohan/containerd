@@ -22,6 +22,8 @@ import (
 
 	cni "github.com/containerd/go-cni"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/containerd/containerd/v2/internal/cri/sharednetns"
 )
 
 // NOTE(random-liu):
@@ -57,7 +59,11 @@ type Metadata struct {
 	// AdditionalIPs of the Pod if it is attached to non host network
 	AdditionalIPs []string
 	// RuntimeHandler is the runtime handler name of the pod.
-	RuntimeHandler string
+	RuntimeHandler           string
+	ExecutionRuntimeHandler  string                          `json:",omitempty"`
+	ExecutionRuntimeConfig   string                          `json:",omitempty"`
+	ExecutionRuntimeFeatures *runtime.RuntimeHandlerFeatures `json:",omitempty"`
+	SharedNetNS              *sharednetns.Membership         `json:",omitempty"`
 	// CNIresult resulting configuration for attached network namespace interfaces
 	CNIResult *cni.Result
 	// ProcessLabel is the SELinux process label for the container

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	goruntime "runtime"
 	"slices"
 	"sync"
@@ -46,6 +47,7 @@ import (
 	"github.com/containerd/containerd/v2/internal/cri/nri"
 	"github.com/containerd/containerd/v2/internal/cri/server/events"
 	"github.com/containerd/containerd/v2/internal/cri/server/images"
+	"github.com/containerd/containerd/v2/internal/cri/sharednetns"
 	containerstore "github.com/containerd/containerd/v2/internal/cri/store/container"
 	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	"github.com/containerd/containerd/v2/internal/cri/store/label"
@@ -116,6 +118,7 @@ type ImageService interface {
 	Config() criconfig.ImageConfig
 
 	UpdateRuntime(runtimeName string, imagePlatform *images.ImagePlatform)
+	UpdateRuntimeAlias(alias, runtimeName string) error
 }
 
 // criService implements CRIService.
@@ -126,7 +129,8 @@ type criService struct {
 	RuntimeService
 	ImageService
 	// config contains all configurations.
-	config criconfig.Config
+	config      criconfig.Config
+	sharedNetNS *sharednetns.Manager
 	// imageFSPaths contains path to image filesystem for snapshotters.
 	imageFSPaths map[string]string
 	// os is an interface for all required os operations.
@@ -246,6 +250,12 @@ func NewCRIService(options *CRIServiceOptions) (CRIService, runtime.RuntimeServi
 	if err := c.initPlatform(); err != nil {
 		return nil, nil, fmt.Errorf("initialize platform: %w", err)
 	}
+	if goruntime.GOOS == "linux" {
+		c.sharedNetNS, err = sharednetns.New(filepath.Join(config.RootDir, "shared-netns"), filepath.Join(config.StateDir, "shared-netns"))
+		if err != nil {
+			return nil, nil, fmt.Errorf("initialize shared network namespaces: %w", err)
+		}
+	}
 
 	// prepare streaming server
 	c.streamServer, err = streaming.NewServer(options.StreamingConfig, newStreamRuntime(c))
@@ -280,6 +290,7 @@ func NewCRIService(options *CRIServiceOptions) (CRIService, runtime.RuntimeServi
 			return nil, nil, fmt.Errorf("failed to introspect runtime %s: %w", name, err)
 		}
 	}
+	c.registerSharedNetNSRuntimeHandler()
 
 	c.runtimeFeatures = &runtime.RuntimeFeatures{
 		SupplementalGroupsPolicy:  true,

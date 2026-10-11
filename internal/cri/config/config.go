@@ -486,7 +486,8 @@ const (
 	// RuntimeUntrusted is the implicit runtime defined for ContainerdConfig.UntrustedWorkloadRuntime
 	RuntimeUntrusted = "untrusted"
 	// RuntimeDefault is the implicit runtime defined for ContainerdConfig.DefaultRuntime
-	RuntimeDefault = "default"
+	RuntimeDefault     = "default"
+	RuntimeSharedNetNS = "shared-netns"
 	// KeyModelNode is the key model where key for encrypted images reside
 	// on the worker nodes
 	KeyModelNode = "node"
@@ -626,6 +627,12 @@ func ValidateRuntimeConfig(ctx context.Context, c *RuntimeConfig) ([]deprecation
 	if c.ContainerdConfig.DefaultRuntimeName == "" {
 		return warnings, errors.New("`default_runtime_name` is empty")
 	}
+	if c.ContainerdConfig.DefaultRuntimeName == RuntimeSharedNetNS {
+		return warnings, fmt.Errorf("`default_runtime_name` cannot be %q: shared network namespaces delegate to the default runtime", RuntimeSharedNetNS)
+	}
+	if _, ok := c.ContainerdConfig.Runtimes[RuntimeSharedNetNS]; ok {
+		return warnings, fmt.Errorf("runtime handler %q is reserved for shared network namespaces", RuntimeSharedNetNS)
+	}
 	if _, ok := c.ContainerdConfig.Runtimes[c.ContainerdConfig.DefaultRuntimeName]; !ok {
 		return warnings, fmt.Errorf("no corresponding runtime configured in `containerd.runtimes` for `containerd` `default_runtime_name = \"%s\"", c.ContainerdConfig.DefaultRuntimeName)
 	}
@@ -690,10 +697,15 @@ func ValidateServerConfig(ctx context.Context, c *ServerConfig) ([]deprecation.W
 }
 
 func (config *Config) GetSandboxRuntime(podSandboxConfig *runtime.PodSandboxConfig, runtimeHandler string) (Runtime, error) {
+	_, resolvedRuntime, err := config.ResolveSandboxRuntime(podSandboxConfig, runtimeHandler)
+	return resolvedRuntime, err
+}
+
+func (config *Config) ResolveSandboxRuntime(podSandboxConfig *runtime.PodSandboxConfig, runtimeHandler string) (string, Runtime, error) {
 	if untrustedWorkload(podSandboxConfig) {
 		// If the untrusted annotation is provided, runtimeHandler MUST be empty.
 		if runtimeHandler != "" && runtimeHandler != RuntimeUntrusted {
-			return Runtime{}, errors.New("untrusted workload with explicit runtime handler is not allowed")
+			return "", Runtime{}, errors.New("untrusted workload with explicit runtime handler is not allowed")
 		}
 
 		//  If the untrusted workload is requesting access to the host/node, this request will fail.
@@ -703,22 +715,41 @@ func (config *Config) GetSandboxRuntime(podSandboxConfig *runtime.PodSandboxConf
 		// is a supported option, granting the workload to access the entire guest VM instead of host.
 		// TODO(windows): Deprecate this so that we don't need to handle it for windows.
 		if hostAccessingSandbox(podSandboxConfig) {
-			return Runtime{}, errors.New("untrusted workload with host access is not allowed")
+			return "", Runtime{}, errors.New("untrusted workload with host access is not allowed")
 		}
 
 		runtimeHandler = RuntimeUntrusted
 	}
 
-	if runtimeHandler == "" {
+	sharedNetNS := runtimeHandler == RuntimeSharedNetNS
+	if sharedNetNS {
+		if _, ok := config.Runtimes[RuntimeSharedNetNS]; ok {
+			return "", Runtime{}, fmt.Errorf("runtime handler %q is reserved for shared network namespaces", RuntimeSharedNetNS)
+		}
+	}
+	if runtimeHandler == "" || sharedNetNS {
 		runtimeHandler = config.DefaultRuntimeName
 	}
-
-	r, ok := config.Runtimes[runtimeHandler]
-	if !ok {
-		return Runtime{}, fmt.Errorf("no runtime for %q is configured", runtimeHandler)
+	if runtimeHandler == RuntimeSharedNetNS {
+		return "", Runtime{}, fmt.Errorf("`default_runtime_name` cannot be %q: shared network namespaces delegate to the default runtime", RuntimeSharedNetNS)
 	}
-	return r, nil
 
+	resolvedRuntime, ok := config.Runtimes[runtimeHandler]
+	if !ok {
+		return "", Runtime{}, fmt.Errorf("no runtime for %q is configured", runtimeHandler)
+	}
+	if sharedNetNS {
+		if gruntime.GOOS != "linux" {
+			return "", Runtime{}, fmt.Errorf("runtime handler %q is only supported on Linux", RuntimeSharedNetNS)
+		}
+		if resolvedRuntime.Type != "io.containerd.runc.v2" {
+			return "", Runtime{}, fmt.Errorf("runtime handler %q requires default runtime type io.containerd.runc.v2, got %q", RuntimeSharedNetNS, resolvedRuntime.Type)
+		}
+		if resolvedRuntime.Sandboxer != "" && resolvedRuntime.Sandboxer != string(ModePodSandbox) {
+			return "", Runtime{}, fmt.Errorf("runtime handler %q requires the podsandbox controller, got %q", RuntimeSharedNetNS, resolvedRuntime.Sandboxer)
+		}
+	}
+	return runtimeHandler, resolvedRuntime, nil
 }
 
 // untrustedWorkload returns true if the sandbox contains untrusted workload.

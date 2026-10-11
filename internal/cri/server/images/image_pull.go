@@ -876,13 +876,10 @@ func (rt *pullRequestReporterRoundTripper) RoundTrip(req *http.Request) (*http.R
 func (c *CRIImageService) snapshotterFromPodSandboxConfig(ctx context.Context, imageRef string,
 	s *runtime.PodSandboxConfig, runtimeHandler string) (string, error) {
 	snapshotter := c.config.Snapshotter
-	if s == nil {
-		return snapshotter, nil
-	}
 
 	// If runtimeHandler parameter is empty, fall back to annotation for backward compatibility
 	if runtimeHandler == "" {
-		if s.Annotations == nil {
+		if s == nil || s.Annotations == nil {
 			return snapshotter, nil
 		}
 		var ok bool

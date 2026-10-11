@@ -80,6 +80,16 @@ func (c *criService) PodSandboxStatus(ctx context.Context, r *runtime.PodSandbox
 	}
 
 	status := toCRISandboxStatus(sandbox.Metadata, state, createdAt, ip, additionalIPs)
+	if sandbox.SharedNetNS != nil {
+		networkErr := c.validateSandboxNetwork(sandbox)
+		if networkErr != nil {
+			status.State = runtime.PodSandboxState_SANDBOX_NOTREADY
+			info["sharedNetNSError"] = networkErr.Error()
+		}
+		if err := setSandboxNetworkClosed(info, networkErr != nil); err != nil {
+			return nil, fmt.Errorf("set shared network namespace status: %w", err)
+		}
+	}
 	if status.GetCreatedAt() == 0 {
 		// CRI doesn't allow CreatedAt == 0.
 		sandboxInfo, err := c.client.SandboxStore().Get(ctx, sandbox.ID)
@@ -95,7 +105,33 @@ func (c *criService) PodSandboxStatus(ctx context.Context, r *runtime.PodSandbox
 	}, nil
 }
 
+func setSandboxNetworkClosed(info map[string]string, closed bool) error {
+	var sandboxInfo map[string]json.RawMessage
+	if data := info["info"]; data != "" {
+		if err := json.Unmarshal([]byte(data), &sandboxInfo); err != nil {
+			return err
+		}
+	}
+	if sandboxInfo == nil {
+		sandboxInfo = make(map[string]json.RawMessage)
+	}
+	encodedClosed, err := json.Marshal(closed)
+	if err != nil {
+		return err
+	}
+	sandboxInfo["netNamespaceClosed"] = encodedClosed
+	data, err := json.Marshal(sandboxInfo)
+	if err != nil {
+		return err
+	}
+	info["info"] = string(data)
+	return nil
+}
+
 func (c *criService) getIPs(sandbox sandboxstore.Sandbox) (string, []string, error) {
+	if sandbox.SharedNetNS != nil {
+		return "", nil, nil
+	}
 	config := sandbox.Config
 
 	// For sandboxes using the node network we are not
@@ -188,7 +224,7 @@ func toDeletedCRISandboxInfo(sandbox sandboxstore.Sandbox) (map[string]string, e
 	// status which does not exist in containerd.
 	si.Status = "deleted"
 
-	if sandbox.NetNS != nil {
+	if sandbox.NetNS != nil && sandbox.SharedNetNS == nil {
 		// Add network closed information if sandbox is not using host network.
 		closed, err := sandbox.NetNS.Closed()
 		if err != nil {

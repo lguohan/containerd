@@ -18,6 +18,7 @@ package images
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -155,6 +156,18 @@ func (c *CRIImageService) UpdateRuntime(runtimeName string, imagePlatform *Image
 	if imagePlatform != nil {
 		log.L.Infof("Registered runtime %q with snapshotter %q", runtimeName, imagePlatform.Snapshotter)
 	}
+}
+
+func (service *CRIImageService) UpdateRuntimeAlias(alias, runtimeName string) error {
+	if _, exists := service.runtimePlatforms[alias]; exists {
+		return fmt.Errorf("runtime handler alias %q is already configured", alias)
+	}
+	imagePlatform, exists := service.runtimePlatforms[runtimeName]
+	if !exists {
+		return fmt.Errorf("runtime handler alias %q refers to unknown runtime %q", alias, runtimeName)
+	}
+	service.runtimePlatforms[alias] = imagePlatform
+	return nil
 }
 
 // LocalResolve resolves image reference locally and returns corresponding image metadata. It

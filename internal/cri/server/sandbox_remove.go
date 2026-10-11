@@ -67,7 +67,7 @@ func (c *criService) RemovePodSandbox(ctx context.Context, r *runtime.RemovePodS
 	}
 
 	// Return error if sandbox network namespace is not closed yet.
-	if sandbox.NetNS != nil {
+	if sandbox.NetNS != nil && sandbox.SharedNetNS == nil {
 		nsPath := sandbox.NetNS.GetPath()
 		if closed, err := sandbox.NetNS.Closed(); err != nil {
 			return nil, fmt.Errorf("failed to check sandbox network namespace %q closed: %w", nsPath, err)

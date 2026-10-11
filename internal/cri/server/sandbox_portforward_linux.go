@@ -34,6 +34,9 @@ func (c *criService) portForward(ctx context.Context, id string, port int32, str
 	if err != nil {
 		return fmt.Errorf("failed to find sandbox %q in store: %w", id, err)
 	}
+	if err := c.validateSandboxNetwork(s); err != nil {
+		return fmt.Errorf("validate sandbox network namespace: %w", err)
+	}
 
 	var (
 		netNSDo func(func(ns.NetNS) error) error
@@ -41,10 +44,12 @@ func (c *criService) portForward(ctx context.Context, id string, port int32, str
 		netNSPath string
 	)
 	if !hostNetwork(s.Config) {
-		if closed, err := s.NetNS.Closed(); err != nil {
-			return fmt.Errorf("failed to check netwok namespace closed for sandbox %q: %w", id, err)
-		} else if closed {
-			return fmt.Errorf("network namespace for sandbox %q is closed", id)
+		if s.SharedNetNS == nil {
+			if closed, err := s.NetNS.Closed(); err != nil {
+				return fmt.Errorf("failed to check netwok namespace closed for sandbox %q: %w", id, err)
+			} else if closed {
+				return fmt.Errorf("network namespace for sandbox %q is closed", id)
+			}
 		}
 		netNSDo = s.NetNS.Do
 		netNSPath = s.NetNS.GetPath()

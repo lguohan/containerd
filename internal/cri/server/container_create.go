@@ -78,6 +78,9 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	if sandbox.Status.Get().State != sandboxstore.StateReady {
 		return nil, fmt.Errorf("sandbox container %q is not running", sandboxID)
 	}
+	if err := c.validateSandboxNetwork(sandbox); err != nil {
+		return nil, fmt.Errorf("validate sandbox network namespace: %w", err)
+	}
 	span.SetAttributes(
 		tracing.Attribute("sandbox.id", sandboxID),
 		tracing.Attribute("sandbox.pid", sandboxPid),
@@ -250,9 +253,9 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 		log.G(r.ctx).Debugf("Ignoring volumes defined in image %v because IgnoreImageDefinedVolumes is set", r.imageID)
 	}
 
-	runtimeHandler, ok := c.runtimeHandlers[r.sandboxRuntimeHandler]
-	if !ok {
-		return "", fmt.Errorf("failed to find runtime handler %q", r.sandboxRuntimeHandler)
+	runtimeHandler, err := c.runtimeHandlerForSandbox(r.sandbox.Metadata, r.sandboxRuntimeHandler)
+	if err != nil {
+		return "", err
 	}
 	log.G(r.ctx).Debugf("Use OCI runtime %+v for sandbox %q and container %q", ociRuntime, r.sandboxID, r.containerID)
 

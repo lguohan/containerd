@@ -104,7 +104,11 @@ func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sa
 	}
 
 	// Teardown network for sandbox.
-	if sandbox.NetNS != nil {
+	if sandbox.SharedNetNS != nil {
+		if err := c.releaseSandboxNetwork(sandbox); err != nil {
+			return fmt.Errorf("release shared network namespace for sandbox %q: %w", id, err)
+		}
+	} else if sandbox.NetNS != nil {
 		span.AddEvent("start pod network teardown")
 		netStop := time.Now()
 		// Use empty netns path if netns is not available. This is defined in:
@@ -152,6 +156,9 @@ func (c *criService) waitSandboxStop(ctx context.Context, sandbox sandboxstore.S
 
 // teardownPodNetwork removes the network from the pod
 func (c *criService) teardownPodNetwork(ctx context.Context, sandbox sandboxstore.Sandbox) error {
+	if sandbox.SharedNetNS != nil {
+		return nil
+	}
 	netPlugin := c.getNetworkPlugin(sandbox.RuntimeHandler)
 	if netPlugin == nil {
 		return errors.New("cni config not initialized")

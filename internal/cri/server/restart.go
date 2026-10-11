@@ -28,6 +28,7 @@ import (
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	crilabels "github.com/containerd/containerd/v2/internal/cri/labels"
 	"github.com/containerd/containerd/v2/internal/cri/server/podsandbox"
+	"github.com/containerd/containerd/v2/internal/cri/sharednetns"
 	containerdio "github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/netns"
 	"github.com/containerd/errdefs"
@@ -156,6 +157,18 @@ func (c *criService) recover(ctx context.Context) error {
 
 		if err := c.sandboxStore.Add(sb); err != nil {
 			return fmt.Errorf("failed to add stored sandbox %q to store: %w", sbx.ID, err)
+		}
+	}
+
+	if c.sharedNetNS != nil {
+		var members []sharednetns.Membership
+		for _, recovered := range c.sandboxStore.List() {
+			if recovered.SharedNetNS != nil {
+				members = append(members, *recovered.SharedNetNS)
+			}
+		}
+		if err := c.sharedNetNS.Recover(members); err != nil {
+			return fmt.Errorf("recover shared network namespaces: %w", err)
 		}
 	}
 
@@ -483,7 +496,7 @@ func (c *criService) createContainerIO(containerID, sandboxID string, config *ru
 	if err != nil {
 		return nil, fmt.Errorf("an error occurred when try to find sandbox %q: %w", sandboxID, err)
 	}
-	ociRuntime, err := c.config.GetSandboxRuntime(sb.Config, sb.Metadata.RuntimeHandler)
+	ociRuntime, err := sb.Metadata.GetRuntime(&c.config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sandbox runtime: %w", err)
 	}

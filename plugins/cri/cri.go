@@ -104,6 +104,11 @@ func initCRIService(ic *plugin.InitContext) (any, error) {
 		}
 		imageSvc.UpdateRuntime(runtimeName, imagePlatform)
 	}
+	if runtimeName, _, err := runtimeConfig.ResolveSandboxRuntime(nil, criconfig.RuntimeSharedNetNS); err == nil {
+		if err := imageSvc.UpdateRuntimeAlias(criconfig.RuntimeSharedNetNS, runtimeName); err != nil {
+			return nil, fmt.Errorf("register shared network namespace runtime image platform: %w", err)
+		}
+	}
 
 	ws, err := ic.GetSingle(plugins.WarningPlugin)
 	if err != nil {

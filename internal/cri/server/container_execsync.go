@@ -169,7 +169,7 @@ func (c *criService) execInternal(ctx context.Context, container containerd.Cont
 			if err != nil {
 				return nil, fmt.Errorf("an error occurred when try to find sandbox %q: %w", cntr.SandboxID, err)
 			}
-			ociRuntime, err := c.config.GetSandboxRuntime(sb.Config, sb.Metadata.RuntimeHandler)
+			ociRuntime, err := sb.Metadata.GetRuntime(&c.config)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get sandbox runtime: %w", err)
 			}

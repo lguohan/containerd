@@ -43,6 +43,9 @@ func (c *criService) podSandboxStats(
 	if sandbox.Status.Get().State != sandboxstore.StateReady {
 		return nil, fmt.Errorf("failed to get pod sandbox stats since sandbox container %q is not in ready state: %w", meta.ID, errdefs.ErrUnavailable)
 	}
+	if err := c.validateSandboxNetwork(sandbox); err != nil {
+		return nil, fmt.Errorf("validate sandbox network namespace for stats: %w", err)
+	}
 
 	ctrl, err := c.sandboxService.SandboxController(sandbox.Sandboxer)
 	if err != nil {

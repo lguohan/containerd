@@ -150,6 +150,9 @@ func (c *criService) ListPodSandboxMetrics(ctx context.Context, r *runtime.ListP
 
 // collectPodSandboxMetrics collects metrics for a specific pod sandbox
 func (c *criService) collectPodSandboxMetrics(ctx context.Context, sandbox sandboxstore.Sandbox, labels []string) (*runtime.PodSandboxMetrics, error) {
+	if err := c.validateSandboxNetwork(sandbox); err != nil {
+		return nil, fmt.Errorf("validate sandbox network namespace for metrics: %w", err)
+	}
 	podMetrics := &runtime.PodSandboxMetrics{
 		PodSandboxId: sandbox.Metadata.ID,
 	}
